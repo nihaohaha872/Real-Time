@@ -1,0 +1,130 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <sys/dispatch.h>
+#include <unistd.h>
+#include <string.h>
+
+#define ATTACH_POINT "SIMULATOR"         // Server's attach point for the simulator
+#define CONTROLLER_ATTACH_POINT "CONTROLLER" // Attach point for the controller
+#define BUF_SIZE 100
+#define cls "\e[1;1H\e[2J"               // Clear console screen
+
+typedef struct _Mypulse
+{
+    _Uint16t type;
+    _Uint16t subtype;
+    _Int8t code;
+    _Uint8t zero[3];
+    _Uint32t value;
+    _Uint8t zero2[2];
+    _Int32t scoid;
+} msg_header_t;
+
+typedef struct
+{
+    msg_header_t hdr;
+    char buf[BUF_SIZE];
+} traffic_msg;
+
+typedef struct
+{
+    msg_header_t hdr;
+    char reply[BUF_SIZE];
+} traffic_reply;
+
+// Shared resource to manage access
+pthread_mutex_t input_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Thread function for car sensing (console input)
+void *car_sensing(void *arg)
+{
+    int server_coid_2 = *((int *)arg);  // Connection ID to the simulator
+    traffic_msg msg;
+    msg.hdr.type = 0;  // Set message type (could customize as needed)
+    char input[BUF_SIZE];
+
+    while (1)
+    {
+        printf("Enter car sensing input: ");
+        fgets(input, BUF_SIZE, stdin);
+
+        // Remove newline character from input
+        input[strcspn(input, "\n")] = '\0';
+
+        // Send the car sensing input to the controller
+        pthread_mutex_lock(&input_mutex);
+        strcpy(msg.buf, input);
+        if (MsgSend(server_coid_2, &msg, sizeof(msg), NULL, 0) == -1)
+        {
+            perror("MsgSend failed");
+        }
+        pthread_mutex_unlock(&input_mutex);
+    }
+
+    return NULL;
+}
+
+int main(int argc, char *argv[])
+{
+    int server_coid;  // Connection ID for sending messages to the controller
+    int server_coid_2; // Connection ID for sending messages to the simulator
+    name_attach_t *attach;
+    traffic_msg msg;
+
+    // Connect to the CONTROLLER
+    while ((server_coid = name_open(CONTROLLER_ATTACH_POINT, 0)) == -1)
+    {
+        printf("\n    ERROR: Could not connect to CONTROLLER!\nRETRYING\n");
+        sleep(3);  // Wait for 3 seconds before retrying
+    }
+    printf("Connected to CONTROLLER\n");
+
+    // Create the car sensing thread
+    pthread_t car_sensing_thread;
+    if (pthread_create(&car_sensing_thread, NULL, car_sensing, (void *)&server_coid) != 0)
+    {
+        perror("Failed to create car sensing thread");
+        return EXIT_FAILURE;
+    }
+
+    // Server setup for receiving messages from clients
+    if ((attach = name_attach(NULL, ATTACH_POINT, 0)) == NULL)
+    {
+        printf("Failed to attach to name: %s\n", ATTACH_POINT);
+        return EXIT_FAILURE;
+    }
+
+    printf("Server listening on %s\n", ATTACH_POINT);
+
+    // Main loop to receive client messages
+    int rcvid;
+    while (1)
+    {
+        rcvid = MsgReceive(attach->chid, &msg, sizeof(msg), NULL);
+        if (rcvid == -1)
+        {
+            perror("MsgReceive failed");
+            continue;
+        }
+
+        printf("Received message: %s\n", msg.buf);
+
+        // Send a reply to the sender
+        traffic_reply reply; // replying to client
+        strcpy(reply.reply, "Message received");
+        if (MsgReply(rcvid, EOK, &reply, sizeof(reply)) == -1)
+        {
+            perror("MsgReply failed");
+        }
+
+        // Optional: Send the message to the controller
+        if (MsgSend(server_coid, &msg, sizeof(msg), NULL, 0) == -1)
+        {
+            perror("MsgSend to controller failed");
+        }
+    }
+
+    name_detach(attach, 0);
+    return EXIT_SUCCESS;
+}
